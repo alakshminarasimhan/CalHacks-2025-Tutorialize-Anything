@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
-import { useEcho } from '@merit-systems/echo-react-sdk';
+import { useAuth } from '@/lib/AuthContext';
 
 export default function HomePage() {
   const router = useRouter();
-  const { user, signOut, isLoading: authLoading } = useEcho();
+  const { user, isLoading: authLoading, signOut, isAuthenticated } = useAuth();
   const [targetURL, setTargetURL] = useState('');
   const [narrativeStyle, setNarrativeStyle] = useState('explain5');
   const [loading, setLoading] = useState(false);
@@ -14,13 +14,13 @@ export default function HomePage() {
 
   // Check authentication on mount
   useEffect(() => {
-    if (!authLoading && !user) {
+    if (!authLoading && !isAuthenticated) {
       router.push('/login');
     }
-  }, [user, authLoading, router]);
+  }, [authLoading, isAuthenticated, router]);
 
-  const handleLogout = async () => {
-    await signOut();
+  const handleLogout = () => {
+    signOut();
     router.push('/login');
   };
 
@@ -142,6 +142,12 @@ export default function HomePage() {
       <div className="w-full max-w-2xl px-6">
         {/* User Info & Logout */}
         <div className="absolute top-4 right-4 flex items-center gap-3">
+          <button
+            onClick={() => router.push('/saved')}
+            className="text-sm text-gray-600 hover:text-gray-900 underline"
+          >
+            Saved Storyboards
+          </button>
           <span className="text-sm text-gray-600">
             {user.email || 'Logged in'}
           </span>

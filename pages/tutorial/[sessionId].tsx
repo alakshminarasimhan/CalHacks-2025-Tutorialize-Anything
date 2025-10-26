@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/router';
-import { useEcho } from '@merit-systems/echo-react-sdk';
+import { useAuth } from '@/lib/AuthContext';
 
 interface FrameData {
   visualScene: string;
@@ -12,25 +12,27 @@ interface FrameData {
 export default function TutorialViewer() {
   const router = useRouter();
   const { sessionId } = router.query;
-  const { user, isLoading: authLoading } = useEcho();
+  const { user, isLoading: authLoading, getToken, isAuthenticated } = useAuth();
   const [frames, setFrames] = useState<FrameData[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [loadingFrame, setLoadingFrame] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [isPlaying, setIsPlaying] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [isSaved, setIsSaved] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   // Check authentication
   useEffect(() => {
-    if (!authLoading && !user) {
+    if (!authLoading && !isAuthenticated) {
       router.push('/login');
     }
-  }, [user, authLoading, router]);
+  }, [authLoading, isAuthenticated, router]);
 
   useEffect(() => {
     if (!sessionId || typeof sessionId !== 'string') return;
-    if (!user) return; // Don't fetch if not logged in
+    if (!isAuthenticated) return; // Don't fetch if not logged in
 
     const fetchData = async () => {
       try {
@@ -55,7 +57,7 @@ export default function TutorialViewer() {
     };
 
     fetchData();
-  }, [sessionId, user]);
+  }, [sessionId, isAuthenticated]);
 
   const handlePlayPause = async () => {
     if (!audioRef.current) {
@@ -118,6 +120,35 @@ export default function TutorialViewer() {
     }
   };
 
+  const handleSaveTutorial = async () => {
+    if (!sessionId || typeof sessionId !== 'string') return;
+
+    setSaving(true);
+    try {
+      const token = await getToken();
+      const res = await fetch('/api/storyboards/save', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ sessionId }),
+      });
+
+      if (res.ok) {
+        setIsSaved(true);
+        alert('Tutorial saved successfully!');
+      } else {
+        throw new Error('Failed to save');
+      }
+    } catch (error) {
+      console.error('Error saving tutorial:', error);
+      alert('Failed to save tutorial. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -170,9 +201,26 @@ export default function TutorialViewer() {
       {/* Top Header */}
       <div className="bg-white border-b border-gray-200 py-3 px-6">
         <div className="flex items-center justify-between max-w-7xl mx-auto">
-          <h1 className="text-xl font-light text-gray-900">Tutorial Maker</h1>
-          <div className="text-sm text-gray-500">
-            Frame <span className="font-medium text-gray-900">{currentIndex + 1}</span> of <span className="font-medium text-gray-900">{frames.length}</span>
+          <div className="flex items-center gap-4">
+            <h1 className="text-xl font-light text-gray-900">Tutorial Maker</h1>
+            <button
+              onClick={() => router.push('/saved')}
+              className="text-sm text-gray-600 hover:text-gray-900 underline"
+            >
+              Saved Storyboards
+            </button>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="text-sm text-gray-500">
+              Frame <span className="font-medium text-gray-900">{currentIndex + 1}</span> of <span className="font-medium text-gray-900">{frames.length}</span>
+            </div>
+            <button
+              onClick={handleSaveTutorial}
+              disabled={saving || isSaved}
+              className="px-4 py-2 text-sm bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {saving ? 'Saving...' : isSaved ? 'Saved!' : 'Save Tutorial'}
+            </button>
           </div>
         </div>
       </div>

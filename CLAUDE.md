@@ -35,8 +35,8 @@ npm test:watch
 
 Create `.env.local` file with:
 
-- **NEXT_PUBLIC_ECHO_API_URL**: Merit Systems Echo API endpoint (default: https://echo.merit.systems/api)
-- **NEXT_PUBLIC_ECHO_APP_ID**: Your Echo application ID for OAuth authentication
+- **NEXT_PUBLIC_SUPABASE_URL**: Your Supabase project URL (from Supabase dashboard > Settings > API)
+- **NEXT_PUBLIC_SUPABASE_ANON_KEY**: Your Supabase anon/public key (from Supabase dashboard > Settings > API)
 - **BRIGHTDATA_API_KEY**: Web scraping via BrightData Web Unlocker API
 - **ANTHROPIC_API_KEY**: Claude AI for content analysis and storyboard generation (uses `claude-sonnet-4-5-20250929` model)
 - **FISHAUDIO_API_KEY**: Fish.Audio TTS for narration generation
@@ -48,16 +48,24 @@ Create `.env.local` file with:
 
 ### Authentication Flow
 
-1. **OAuth with Merit Systems Echo** ([pages/login.tsx](pages/login.tsx))
-   - Users sign in via Echo OAuth2 + PKCE
-   - Universal balance across all Echo-powered apps
+1. **Supabase Authentication** ([pages/login.tsx](pages/login.tsx))
+   - Email/password authentication via Supabase Auth
+   - Optional OAuth providers (Google, GitHub, etc.)
    - Protected routes redirect to login if not authenticated
-   - Session managed by Echo React SDK
+   - Session managed by Supabase Auth Helpers for Next.js
+   - User data stored in Supabase PostgreSQL database
 
 2. **Protected Pages**:
    - Homepage ([pages/index.tsx](pages/index.tsx)): Requires authentication
    - Tutorial viewer ([pages/tutorial/[sessionId].tsx](pages/tutorial/[sessionId].tsx)): Requires authentication
+   - Dashboard ([pages/dashboard.tsx](pages/dashboard.tsx)): Requires authentication - shows saved tutorials and preferences
    - Login page ([pages/login.tsx](pages/login.tsx)): Public
+
+3. **User Features**:
+   - **User Preferences** ([pages/api/user/preferences.ts](pages/api/user/preferences.ts)): Store default narrative style preference
+   - **Saved Tutorials** ([pages/api/user/save-tutorial.ts](pages/api/user/save-tutorial.ts)): Save completed tutorials to Supabase
+   - **Tutorial Library** ([pages/api/user/tutorials.ts](pages/api/user/tutorials.ts)): View and manage saved tutorials
+   - **Dashboard**: Central hub for managing preferences and viewing tutorial history
 
 ### Request Pipeline
 
@@ -89,6 +97,7 @@ Create `.env.local` file with:
    - Fetches session data via GET /api/tutorial
    - Displays frames with images and audio playback
    - Supports frame navigation and audio rephrasing
+   - "Save Tutorial" button persists tutorial to user's Supabase account
 
 ### Session Management
 
@@ -156,6 +165,60 @@ S3 bucket must be configured with:
 3. Files stored at: `{sessionId}/frame{N}.png` and `{sessionId}/frame{N}.mp3`
 4. Public URL format: `https://{bucket}.s3.amazonaws.com/{sessionId}/frame{N}.{ext}`
 
+### Supabase Setup
+
+**Database Schema** (run in Supabase SQL Editor):
+
+```sql
+-- User preferences table
+create table user_preferences (
+  user_id uuid references auth.users(id) primary key,
+  preferred_style text default 'explain5',
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+-- Saved tutorials table
+create table saved_tutorials (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) not null,
+  session_id text not null,
+  title text,
+  url text not null,
+  style text not null,
+  frames jsonb not null,
+  created_at timestamp with time zone default now()
+);
+
+-- Indexes
+create index idx_saved_tutorials_user_id on saved_tutorials(user_id);
+create index idx_saved_tutorials_created_at on saved_tutorials(created_at desc);
+
+-- Row Level Security
+alter table user_preferences enable row level security;
+alter table saved_tutorials enable row level security;
+
+-- Policies (users can only access their own data)
+create policy "Users can view own preferences" on user_preferences
+  for select using (auth.uid() = user_id);
+create policy "Users can update own preferences" on user_preferences
+  for update using (auth.uid() = user_id);
+create policy "Users can insert own preferences" on user_preferences
+  for insert with check (auth.uid() = user_id);
+
+create policy "Users can view own tutorials" on saved_tutorials
+  for select using (auth.uid() = user_id);
+create policy "Users can insert own tutorials" on saved_tutorials
+  for insert with check (auth.uid() = user_id);
+create policy "Users can delete own tutorials" on saved_tutorials
+  for delete using (auth.uid() = user_id);
+```
+
+**Authentication Providers** (configure in Supabase Dashboard > Authentication > Providers):
+- Email/Password: Enabled by default
+- Google OAuth: Optional (requires client ID/secret)
+- GitHub OAuth: Optional (requires client ID/secret)
+
 ## Common Development Scenarios
 
 ### Adding a New Narrative Style
@@ -194,6 +257,8 @@ The core storyboard creation happens in Claude's response to the prompt. To chan
 - **Framework**: Next.js 14 (Pages Router, not App Router)
 - **Language**: TypeScript
 - **Styling**: Tailwind CSS
+- **Authentication**: Supabase Auth (email/password + OAuth)
+- **Database**: Supabase PostgreSQL (user preferences, saved tutorials)
 - **APIs**: Next.js API Routes (serverless functions)
 - **External Services**:
   - Anthropic Claude Sonnet 4.5 (AI reasoning)
@@ -201,6 +266,7 @@ The core storyboard creation happens in Claude's response to the prompt. To chan
   - Pollinations.ai (free image generation)
   - Fish.Audio (TTS)
   - AWS S3 (storage)
+  - Supabase (auth + database)
 
 ## Project Structure
 
@@ -211,35 +277,61 @@ pages/
 │   ├── image-gen.ts          # Pollinations.ai image generation + S3 upload
 │   ├── audio-gen.ts          # Fish.Audio TTS + S3 upload
 │   ├── rephrase-audio.ts     # Alternative narration generation
-│   └── test-s3-access.ts     # S3 connectivity test endpoint
+│   ├── test-s3-access.ts     # S3 connectivity test endpoint
+│   └── user/
+│       ├── preferences.ts    # GET/PUT user preferences
+│       ├── save-tutorial.ts  # POST save tutorial to Supabase
+│       └── tutorials.ts      # GET/DELETE user's saved tutorials
 ├── tutorial/
-│   └── [sessionId].tsx       # Tutorial viewer with frame navigation
+│   └── [sessionId].tsx       # Tutorial viewer with frame navigation + save button
 ├── index.tsx                 # Landing page with URL input form
-└── _app.tsx                  # Next.js app wrapper
+├── dashboard.tsx             # User dashboard with saved tutorials & preferences
+├── login.tsx                 # Login/signup page with Supabase auth
+└── _app.tsx                  # Next.js app wrapper with Supabase provider
 
 lib/
-└── session-storage.ts        # In-memory session management (REPLACE FOR PROD)
+├── session-storage.ts        # In-memory session management (temp storage)
+└── supabase.ts               # Supabase client initialization
 ```
 
 ## Known Limitations
 
-1. **In-memory sessions**: Data lost on restart; not horizontally scalable
+1. **In-memory sessions**: Active tutorial sessions (temp data) lost on restart; not horizontally scalable. Saved tutorials persist in Supabase.
 2. **Image generation latency**: 2-3 seconds per frame with Pollinations.ai
 3. **Serverless timeouts**: Long content may timeout on Vercel/Lambda (default 10s)
-4. **No authentication**: Anyone can generate tutorials; implement rate limiting for production
+4. **Rate limiting**: Implement user-based rate limiting for production to prevent abuse
 5. **No caching**: Same URL generates new tutorial each time; add content hash-based caching
 
 ## Testing & Validation
 
-Recommended test URLs:
+**Setup Requirements:**
+1. Create Supabase project and run database schema
+2. Configure Supabase auth providers
+3. Add Supabase credentials to `.env.local`
 
+**Recommended test URLs:**
 - GitHub repo: `https://github.com/facebook/react`
 - Website: Any public website accessible by BrightData
 
-Test sequence:
+**Test sequence:**
 
-1. Submit URL via homepage
-2. Verify Claude storyboard generation (check response JSON)
-3. Verify image generation (check S3 uploads and URLs)
-4. Verify audio generation (check TTS response and S3)
-5. Navigate frames in viewer and test audio playback
+1. **Authentication Flow:**
+   - Sign up with email/password
+   - Verify email confirmation (if enabled)
+   - Login and verify redirect to homepage
+   - Logout and verify redirect to login
+
+2. **Tutorial Generation:**
+   - Submit URL via homepage
+   - Verify Claude storyboard generation (check response JSON)
+   - Verify image generation (check S3 uploads and URLs)
+   - Verify audio generation (check TTS response and S3)
+   - Navigate frames in viewer and test audio playback
+
+3. **User Features:**
+   - Save tutorial from viewer page
+   - Navigate to dashboard
+   - Verify saved tutorial appears
+   - Update user preferences (narrative style)
+   - Delete saved tutorial
+   - Verify saved tutorial can be re-opened and played
