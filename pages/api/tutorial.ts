@@ -217,7 +217,7 @@ export default async function handler(
     let assistantReply = content.text;
 
     // Parse the JSON from Claude's reply
-    let storyboard: Record<string, string>;
+    let storyboard: Record<string, { visualScene: string; narration: string }>;
     try {
       storyboard = JSON.parse(assistantReply);
     } catch (e) {
