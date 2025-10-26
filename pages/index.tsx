@@ -7,6 +7,7 @@ export default function HomePage() {
   const { user, isLoading: authLoading, signOut, isAuthenticated } = useAuth();
   const [targetURL, setTargetURL] = useState('');
   const [narrativeStyle, setNarrativeStyle] = useState('explain5');
+  const [selectedVoice, setSelectedVoice] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [loadingStage, setLoadingStage] = useState('');
@@ -49,6 +50,18 @@ export default function HomePage() {
     { value: 'professional', label: 'Adult Professional' }
   ];
 
+  // Celebrity voice options for Fish.Audio TTS
+  // These are real model IDs from Fish.Audio
+  const voiceOptions = [
+    { value: '07424106e0ff4c58919e77d6f421c48b', label: 'Default Male' },
+    { value: '2a9605eeafe84974b5b20628d42c0060', label: 'Default Female' },
+    { value: 'ac04af95ebe747ceae442e5796e02729', label: 'Minnie Mouse' },
+    { value: 'f98232d43a2a41d8818ef9c0ee80b027', label: 'Kim Kardashian' },
+    { value: '874aa2258ca947fc9cd0a7902ae569ca', label: 'Jake Paul' },
+    { value: '3446a5f02a1c4d6fa6e85cf467302f4f', label: 'Darth Vader' },
+    { value: '54e3a85ac9594ffa83264b8a494b901b', label: 'SpongeBob SquarePants' }
+  ];
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -67,7 +80,11 @@ export default function HomePage() {
       const res = await fetch('/api/tutorial', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetURL, style: narrativeStyle })
+        body: JSON.stringify({
+          url: targetURL,
+          style: narrativeStyle,
+          voiceId: selectedVoice || undefined  // Include voice preference
+        })
       });
 
       if (!res.ok) {
@@ -194,6 +211,25 @@ export default function HomePage() {
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
+          </div>
+
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Narrator Voice
+              <span className="text-gray-500 text-xs ml-2">(Powered by Fish.Audio)</span>
+            </label>
+            <select
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-900 focus:border-transparent outline-none transition"
+              value={selectedVoice}
+              onChange={(e) => setSelectedVoice(e.target.value)}
+            >
+              {voiceOptions.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 mt-2">
+              Choose a celebrity-style voice for your tutorial narration
+            </p>
           </div>
 
           {error && (

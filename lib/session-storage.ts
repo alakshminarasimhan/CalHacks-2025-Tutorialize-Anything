@@ -18,6 +18,7 @@ export interface SessionData {
   frames: FrameData[];
   url: string;
   style: string;
+  voiceId?: string;  // Fish.Audio voice/reference ID for celebrity voices
   createdAt: number;
 }
 
@@ -39,6 +40,7 @@ export function createSession(sessionId: string, data: Partial<SessionData>): vo
     frames: data.frames || [],
     url: data.url || '',
     style: data.style || '',
+    voiceId: data.voiceId,
     createdAt: Date.now(),
   });
 }

@@ -39,7 +39,8 @@ Create `.env.local` file with:
 - **NEXT_PUBLIC_AWS_COGNITO_CLIENT_ID**: Your Cognito App Client ID (from AWS Cognito console)
 - **AWS_DYNAMODB_STORYBOARDS_TABLE**: DynamoDB table name for storyboards (default: tutorialize-storyboards)
 - **AWS_DYNAMODB_USERS_TABLE**: DynamoDB table name for users (default: tutorialize-users)
-- **BRIGHTDATA_API_KEY**: Web scraping via BrightData Web Unlocker API
+- **BRIGHTDATA_API_KEY**: Web scraping via BrightData MCP Server (Model Context Protocol) - Free tier: 5,000 requests/month
+- **PYTHON_PATH**: Path to Python 3 executable for Fetch.ai agent graph (default: python3)
 - **ANTHROPIC_API_KEY**: Claude AI for content analysis and storyboard generation (uses `claude-sonnet-4-5-20250929` model)
 - **FISHAUDIO_API_KEY**: Fish.Audio TTS for narration generation
 - **STABLE_DIFFUSION_API_KEY**: Stable Diffusion 1.5 API key for image generation
@@ -69,33 +70,44 @@ Create `.env.local` file with:
    - **Storyboard Library** ([pages/api/storyboards/list.ts](pages/api/storyboards/list.ts)): View and manage saved tutorials
    - **JWT Authentication**: All API routes protected with Cognito JWT verification
 
-### Request Pipeline
+### Request Pipeline (Agent-Based Workflow)
 
 1. **Content Fetching** ([pages/api/tutorial.ts](pages/api/tutorial.ts))
    - GitHub repos: Fetches README.md from main/master branch
-   - Websites: Uses BrightData Web Unlocker API, then cheerio to extract text content
-   - Content is truncated to avoid token limits (10,000 chars for websites, 8,000 for Claude)
+   - Websites: Uses **BrightData MCP Server** (Model Context Protocol) for advanced scraping
+     - Primary: `scrape_as_markdown` tool returns clean markdown content
+     - Fallback: Web Unlocker API if MCP fails, then cheerio for HTML parsing
+   - Content is truncated to avoid token limits (10,000 chars for websites, 8,000 for agents)
 
-2. **Tutorial Generation** ([pages/api/tutorial.ts](pages/api/tutorial.ts):71-129)
-   - Sends content to Claude with style-specific system prompts
+2. **Multi-Agent Analysis** ([agents/](agents/) - **NEW**)
+   - **RepoFetcherAgent** ([agents/repo_fetcher_agent.py](agents/repo_fetcher_agent.py)): Chunks text into manageable pieces and generates embeddings
+   - **StructureAnalyzerAgent** ([agents/structure_analyzer_agent.py](agents/structure_analyzer_agent.py)): Extracts entities (classes, functions, components) and builds dependency graph using NetworkX
+   - **FlowReasoningAgent** ([agents/flow_reasoning_agent.py](agents/flow_reasoning_agent.py)): Analyzes dependency graph to produce execution flow steps
+   - Agent graph coordinated by [agents/agent_graph.py](agents/agent_graph.py)
+   - Returns: `execution_flow` JSON with key components, functions, and step-by-step flow
+
+3. **Tutorial Generation** ([pages/api/tutorial.ts](pages/api/tutorial.ts):159-247)
+   - Takes execution flow data from agent analysis
+   - Sends to Claude with style-specific system prompts
    - Five narrative styles: explain5, frat, pizza (restaurant analogy), car (factory analogy), professional
-   - Claude returns JSON with step-by-step tutorial frames (typically 5-7 frames)
-   - Each frame contains conversational tutorial text plus visual scene description
+   - Claude converts execution flow into analogy-based tutorial storyboard
+   - Returns JSON with step-by-step tutorial frames (typically 5-7 frames)
+   - Each frame contains: `visualScene` (cartoon description) + `narration` (analogy explanation)
 
-3. **Image Generation** ([pages/api/image-gen.ts](pages/api/image-gen.ts))
+4. **Image Generation** ([pages/api/image-gen.ts](pages/api/image-gen.ts))
    - Extracts visual descriptions from tutorial frames
    - Calls Pollinations.ai FREE Stable Diffusion API
    - Enforces "NO text/labels" in prompts via extensive negative prompts
    - Uploads generated PNGs to S3
    - Includes retry logic (3 attempts) and rate limit handling
 
-4. **Audio Generation** ([pages/api/audio-gen.ts](pages/api/audio-gen.ts))
+5. **Audio Generation** ([pages/api/audio-gen.ts](pages/api/audio-gen.ts))
    - Sends frame text to Fish.Audio TTS API
    - Generates MP3 narration files
    - Uploads audio to S3
    - Gracefully handles failures (continues to next frame)
 
-5. **Tutorial Viewer** ([pages/tutorial/[sessionId].tsx](pages/tutorial/[sessionId].tsx))
+6. **Tutorial Viewer** ([pages/tutorial/[sessionId].tsx](pages/tutorial/[sessionId].tsx))
    - Fetches session data via GET /api/tutorial
    - Displays frames with images and audio playback
    - Supports frame navigation and audio rephrasing
@@ -189,6 +201,24 @@ S3 bucket must be configured with:
 
 See [AWS_SETUP_GUIDE.md](AWS_SETUP_GUIDE.md) and [AUTHENTICATION_CHECKLIST.md](AUTHENTICATION_CHECKLIST.md) for detailed setup instructions.
 
+### BrightData MCP & Python Agent Setup
+
+**BrightData MCP Configuration**:
+1. Sign up at [brightdata.com](https://brightdata.com) for API token
+2. Free tier: 5,000 requests/month for first 3 months
+3. Add `BRIGHTDATA_API_KEY` to `.env.local`
+4. MCP client at [lib/brightdata-mcp-client.ts](lib/brightdata-mcp-client.ts) handles scraping
+5. Fallback to Web Unlocker API if MCP fails
+
+**Python Agent Dependencies**:
+1. Install Python 3.8+ on your system
+2. Install agent dependencies: `cd agents && pip install -r requirements.txt`
+3. Required packages: `uagents>=0.12.0`, `networkx>=3.0`
+4. Set `PYTHON_PATH` in `.env.local` (default: `python3`)
+5. Agent graph executes via subprocess with 30-second timeout
+
+See [BRIGHTDATA_MCP_SETUP.md](BRIGHTDATA_MCP_SETUP.md) and [agents/README.md](agents/README.md) for detailed setup instructions.
+
 ## Common Development Scenarios
 
 ### Adding a New Narrative Style
@@ -231,20 +261,22 @@ The core storyboard creation happens in Claude's response to the prompt. To chan
 - **Database**: AWS DynamoDB (user data, saved tutorials)
 - **APIs**: Next.js API Routes (serverless functions)
 - **External Services**:
-  - Anthropic Claude Sonnet 4.5 (AI reasoning)
-  - BrightData Web Unlocker (web scraping)
+  - Anthropic Claude Sonnet 4.5 (AI reasoning & storyboard generation)
+  - BrightData MCP Server (Model Context Protocol web scraping)
+  - Fetch.ai uAgents (multi-agent reasoning framework)
   - Pollinations.ai (free image generation)
   - Fish.Audio (TTS)
   - AWS S3 (media storage)
   - AWS Cognito (authentication)
   - AWS DynamoDB (persistent storage)
+- **Agent Framework**: Python 3.8+ with Fetch.ai uAgents SDK
 
 ## Project Structure
 
 ```
 pages/
 ├── api/
-│   ├── tutorial.ts           # Content fetch + Claude storyboard generation
+│   ├── tutorial.ts           # Content fetch + agent analysis + Claude storyboard generation
 │   ├── image-gen.ts          # Pollinations.ai image generation + S3 upload
 │   ├── audio-gen.ts          # Fish.Audio TTS + S3 upload
 │   ├── rephrase-audio.ts     # Alternative narration generation
@@ -266,7 +298,17 @@ lib/
 ├── cognito.ts                # AWS Cognito authentication client
 ├── dynamodb.ts               # DynamoDB client for storyboard storage
 ├── auth-middleware.ts        # JWT token verification middleware
-└── AuthContext.tsx           # React context for authentication state
+├── AuthContext.tsx           # React context for authentication state
+├── brightdata-mcp-client.ts  # BrightData MCP client wrapper
+└── brightdata-mcp-runner.js  # Node.js script to invoke MCP server
+
+agents/                       # Python multi-agent reasoning pipeline
+├── repo_fetcher_agent.py     # Chunks text and generates embeddings
+├── structure_analyzer_agent.py  # Extracts entities and dependency graph
+├── flow_reasoning_agent.py   # Produces execution flow from graph
+├── agent_graph.py            # Orchestrates agent pipeline
+├── requirements.txt          # Python dependencies (uagents, networkx)
+└── README.md                 # Agent setup and usage guide
 ```
 
 ## Known Limitations

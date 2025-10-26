@@ -21,7 +21,7 @@ export default async function handler(
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { sessionId } = req.body;
+  const { sessionId, voiceId: requestVoiceId } = req.body;
 
   if (!sessionId || typeof sessionId !== 'string') {
     return res.status(400).json({ error: 'Invalid sessionId' });
@@ -31,6 +31,10 @@ export default async function handler(
   if (!session) {
     return res.status(400).json({ error: 'Session not found' });
   }
+
+  // Use voice from request, fallback to session voice, or use default (null)
+  const voiceId = requestVoiceId || session.voiceId || null;
+  console.log('Using voice ID:', voiceId);
 
   try {
     const storyboard = session.steps;
@@ -59,12 +63,16 @@ export default async function handler(
 
       try {
         // Prepare TTS request payload - using the narration field for storytelling audio
-        const ttsPayload = {
+        const ttsPayload: any = {
           text: narration,
           format: 'mp3',
-          sample_rate: 44100,
-          reference_id: null
+          sample_rate: 44100
         };
+
+        // Only add reference_id if a voice is specified
+        if (voiceId) {
+          ttsPayload.reference_id = voiceId;
+        }
 
         const ttsRes = await fetch(FISH_API_URL, {
           method: 'POST',

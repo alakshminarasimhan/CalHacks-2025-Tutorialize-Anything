@@ -1,41 +1,127 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { Anthropic } from '@anthropic-ai/sdk';
 import { v4 as uuidv4 } from 'uuid';
-import * as cheerio from 'cheerio';
-import { createSession, getSession, SessionData } from '@/lib/session-storage';
+import { createSession, getSession } from '@/lib/session-storage';
+import { BrightDataMCPClient } from '@/lib/brightdata-mcp-client';
 
 const anthropicClient = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY || '',
 });
 
-// Helper: fetch website content via BrightData Web Unlocker API
+// Helper: fetch website content via BrightData MCP
 async function fetchWebsiteContent(url: string): Promise<string> {
   const apiKey = process.env.BRIGHTDATA_API_KEY;
 
   if (!apiKey) {
-    throw new Error('BrightData API key not configured');
+    console.warn('BrightData API key not configured, using basic fetch');
+    // Fallback to basic fetch if no API key
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; TutorialBot/1.0)'
+        }
+      });
+      return await response.text();
+    } catch (error) {
+      throw new Error('Failed to fetch URL and no BrightData API key configured');
+    }
   }
 
-  const response = await fetch('https://api.brightdata.com/request', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      url: url,
-      format: 'raw'
-    })
-  });
+  try {
+    // Use BrightData MCP for scraping
+    const mcpClient = new BrightDataMCPClient(apiKey);
+    console.log('Fetching website via BrightData MCP...');
+    const markdown = await mcpClient.scrapeAsMarkdown(url);
+    console.log('BrightData MCP scraping completed successfully, length:', markdown.length);
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`BrightData request failed with status ${response.status}: ${errorText}`);
+    // Convert markdown back to text (already cleaned by MCP)
+    return markdown;
+  } catch (mcpError) {
+    console.error('BrightData MCP failed:', mcpError);
+
+    try {
+      // Fallback to direct Web Unlocker API
+      console.log('Attempting BrightData Web Unlocker fallback...');
+      const mcpClient = new BrightDataMCPClient(apiKey);
+      const html = await mcpClient.scrapeWithFallback(url);
+      console.log('BrightData fallback completed successfully, length:', html.length);
+      return html;
+    } catch (fallbackError) {
+      console.error('BrightData fallback also failed:', fallbackError);
+
+      // Final fallback to basic fetch
+      console.log('Attempting basic fetch as last resort...');
+      try {
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; TutorialBot/1.0)'
+          }
+        });
+        const html = await response.text();
+        console.log('Basic fetch completed, length:', html.length);
+        return html;
+      } catch (fetchError) {
+        console.error('All fetch methods failed:', fetchError);
+        throw new Error(`Failed to fetch content from URL: ${fetchError instanceof Error ? fetchError.message : 'Unknown error'}`);
+      }
+    }
   }
+}
 
-  const html = await response.text();
-  console.log(`BrightData Web Unlocker completed successfully`);
-  return html;
+// Helper: Analyze content using Claude directly (more reliable than Python agents)
+async function analyzeContentWithClaude(content: string): Promise<any> {
+  try {
+    const analysisPrompt = `Analyze this content and extract the key concepts, main topics, and logical flow. Return ONLY valid JSON in this exact format:
+
+{
+  "key_topics": ["topic1", "topic2", "topic3"],
+  "main_concepts": ["concept1", "concept2", "concept3"],
+  "content_summary": "A 2-3 sentence summary",
+  "complexity_level": "simple" | "moderate" | "complex",
+  "recommended_frames": 5-10
+}
+
+Content to analyze:
+"""
+${content.substring(0, 6000)}
+"""`;
+
+    const response = await anthropicClient.messages.create({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 1000,
+      messages: [{
+        role: 'user',
+        content: analysisPrompt
+      }]
+    });
+
+    const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+
+    if (jsonMatch) {
+      const analysis = JSON.parse(jsonMatch[0]);
+      console.log('Content analysis:', analysis);
+      return analysis;
+    }
+
+    // Fallback if parsing fails
+    return {
+      key_topics: ["system", "process", "data"],
+      main_concepts: ["initialization", "processing", "output"],
+      content_summary: "Technical content requiring explanation",
+      complexity_level: "moderate",
+      recommended_frames: 6
+    };
+  } catch (error) {
+    console.error('Content analysis error:', error);
+    return {
+      key_topics: ["system", "process", "data"],
+      main_concepts: ["initialization", "processing", "output"],
+      content_summary: "Technical content requiring explanation",
+      complexity_level: "moderate",
+      recommended_frames: 6
+    };
+  }
 }
 
 // Helper: fetch GitHub repo content (README.md as a summary)
@@ -67,8 +153,8 @@ async function fetchRepoContent(repoUrl: string): Promise<string> {
   }
 }
 
-// Helper: Build Claude prompt with analogy instructions
-function buildClaudePrompt(contentTranscript: string, style: string) {
+// Helper: Build Claude prompt using actual content and analysis
+function buildClaudePromptFromContent(content: string, analysis: any, style: string) {
   let styleHint = '';
   switch(style) {
     case 'explain5':
@@ -90,7 +176,7 @@ function buildClaudePrompt(contentTranscript: string, style: string) {
       styleHint = 'Explain in a clear and engaging manner.';
   }
 
-  const systemPrompt = `You are a tutorial creator that transforms technical content into engaging stop-motion style storyboard tutorials using visual analogies.
+  const systemPrompt = `You are a tutorial creator that transforms execution flow data into engaging stop-motion style storyboard tutorials using visual analogies.
 
 Your goal is to create a MINIMAL stop-motion sequence that teaches step-by-step using analogies and storytelling.
 
@@ -134,7 +220,33 @@ Example output format:
 
 Do not include any text before or after the JSON object. Only return valid JSON with this exact structure.`;
 
-  const userPrompt = `Content to explain:\n"""${contentTranscript.substring(0, 8000)}"""\n\nStyle requirement: ${styleHint}\n\nCreate a conversational tutorial that teaches this content step-by-step. Use 5-8 frames that flow together as a story. Make it engaging and easy to understand. Each frame should teach something new while building on what came before.`;
+  // Determine frame count based on complexity
+  const recommendedFrames = analysis.recommended_frames || 6;
+  const frameCount = Math.max(5, Math.min(10, recommendedFrames));
+
+  const userPrompt = `Create a ${frameCount}-frame tutorial storyboard explaining this content:
+
+CONTENT SUMMARY: ${analysis.content_summary || 'Technical content'}
+
+KEY TOPICS TO COVER:
+${analysis.key_topics ? analysis.key_topics.map((t: string, i: number) => `${i + 1}. ${t}`).join('\n') : 'Main concepts from the content'}
+
+ACTUAL CONTENT:
+"""
+${content.substring(0, 5000)}
+"""
+
+Style requirement: ${styleHint}
+
+IMPORTANT:
+- Create EXACTLY ${frameCount} frames (step1 through step${frameCount})
+- Each frame must explain a KEY CONCEPT from the actual content above
+- Each frame must have "visualScene" and "narration" fields
+- Use analogies in the narration to explain the REAL concepts from the content
+- Visual scenes should be pure cartoon descriptions with NO text or labels
+- Make it conversational and engaging
+- The tutorial should actually teach what the content is about, not generic system concepts
+- Return ONLY valid JSON with step1, step2, etc.`;
 
   return { systemPrompt, userPrompt };
 }
@@ -164,7 +276,7 @@ export default async function handler(
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  const { url, style } = req.body;
+  const { url, style, voiceId } = req.body;
 
   if (!url) {
     return res.status(400).json({ error: 'Missing URL' });
@@ -177,23 +289,80 @@ export default async function handler(
     if (url.includes('github.com')) {
       contentText = await fetchRepoContent(url);
     } else {
-      const html = await fetchWebsiteContent(url);
+      // Fetch via BrightData MCP (returns markdown or HTML)
+      const scrapedContent = await fetchWebsiteContent(url);
 
-      // Parse HTML to text using cheerio
-      const $ = cheerio.load(html);
-      // Remove script and style elements
-      $('script, style, nav, footer').remove();
-      // Get text content
-      contentText = $('body').text().replace(/\s+/g, ' ').trim();
-      contentText = contentText.slice(0, 10000);
+      console.log('Scraped content length:', scrapedContent.length);
+      console.log('Scraped content preview:', scrapedContent.substring(0, 300));
+
+      // Check if content is already markdown (from MCP) or HTML (from fallback)
+      if (scrapedContent.includes('<html') || scrapedContent.includes('<!DOCTYPE') || scrapedContent.includes('<body')) {
+        // HTML from fallback - clean it using cheerio
+        const cheerio = await import('cheerio');
+        const $ = cheerio.load(scrapedContent);
+
+        // Remove unwanted elements
+        $('script, style, nav, footer, header, iframe, noscript').remove();
+
+        // Try to extract main content area first
+        let extractedText = '';
+
+        // Try common content containers
+        const contentSelectors = [
+          'article',
+          'main',
+          '[role="main"]',
+          '.content',
+          '.main-content',
+          '#content',
+          '#main-content',
+          '.article-body',
+          '.post-content'
+        ];
+
+        for (const selector of contentSelectors) {
+          const content = $(selector).text();
+          if (content.length > extractedText.length) {
+            extractedText = content;
+          }
+        }
+
+        // If no content container found, get body text
+        if (extractedText.length < 100) {
+          extractedText = $('body').text();
+        }
+
+        // Clean up whitespace
+        contentText = extractedText.replace(/\s+/g, ' ').trim();
+      } else {
+        // Already clean markdown from MCP - use directly
+        contentText = scrapedContent;
+      }
+
+      if (contentText.length > 10000) {
+        contentText = contentText.substring(0, 10000);
+      }
     }
+
+    console.log('Extracted content length:', contentText.length);
+    console.log('Content preview:', contentText.substring(0, 200));
 
     if (!contentText || contentText.length < 50) {
-      throw new Error('Could not extract sufficient content from the URL');
+      throw new Error(`Could not extract sufficient content from the URL. Got ${contentText.length} characters.`);
     }
 
-    // Build the prompt for Claude
-    const { systemPrompt, userPrompt } = buildClaudePrompt(contentText, style);
+    // Truncate for agent processing
+    if (contentText.length > 8000) {
+      contentText = contentText.substring(0, 8000);
+    }
+
+    // Analyze content using Claude
+    console.log('Analyzing content with Claude...');
+    const contentAnalysis = await analyzeContentWithClaude(contentText);
+    console.log('Content analysis completed:', contentAnalysis);
+
+    // Build the prompt for Claude using content analysis
+    const { systemPrompt, userPrompt } = buildClaudePromptFromContent(contentText, contentAnalysis, style);
 
     // Call Claude API to get the storyboard JSON
     const response = await anthropicClient.messages.create({
@@ -243,6 +412,7 @@ export default async function handler(
       frames: [],
       url,
       style: style || 'explain5',
+      voiceId: voiceId,  // Store voice preference for later audio generation
     });
 
     return res.status(200).json({ sessionId, steps: storyboard });
