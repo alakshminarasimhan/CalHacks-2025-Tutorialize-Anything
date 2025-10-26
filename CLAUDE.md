@@ -35,8 +35,10 @@ npm test:watch
 
 Create `.env.local` file with:
 
-- **NEXT_PUBLIC_SUPABASE_URL**: Your Supabase project URL (from Supabase dashboard > Settings > API)
-- **NEXT_PUBLIC_SUPABASE_ANON_KEY**: Your Supabase anon/public key (from Supabase dashboard > Settings > API)
+- **NEXT_PUBLIC_AWS_COGNITO_USER_POOL_ID**: Your Cognito User Pool ID (from AWS Cognito console)
+- **NEXT_PUBLIC_AWS_COGNITO_CLIENT_ID**: Your Cognito App Client ID (from AWS Cognito console)
+- **AWS_DYNAMODB_STORYBOARDS_TABLE**: DynamoDB table name for storyboards (default: tutorialize-storyboards)
+- **AWS_DYNAMODB_USERS_TABLE**: DynamoDB table name for users (default: tutorialize-users)
 - **BRIGHTDATA_API_KEY**: Web scraping via BrightData Web Unlocker API
 - **ANTHROPIC_API_KEY**: Claude AI for content analysis and storyboard generation (uses `claude-sonnet-4-5-20250929` model)
 - **FISHAUDIO_API_KEY**: Fish.Audio TTS for narration generation
@@ -48,24 +50,24 @@ Create `.env.local` file with:
 
 ### Authentication Flow
 
-1. **Supabase Authentication** ([pages/login.tsx](pages/login.tsx))
-   - Email/password authentication via Supabase Auth
-   - Optional OAuth providers (Google, GitHub, etc.)
+1. **AWS Cognito Authentication** ([pages/login.tsx](pages/login.tsx))
+   - Email/password authentication via AWS Cognito
+   - Email verification on signup
    - Protected routes redirect to login if not authenticated
-   - Session managed by Supabase Auth Helpers for Next.js
-   - User data stored in Supabase PostgreSQL database
+   - Session managed by Cognito identity pools and JWT tokens
+   - User data stored in DynamoDB
 
 2. **Protected Pages**:
    - Homepage ([pages/index.tsx](pages/index.tsx)): Requires authentication
    - Tutorial viewer ([pages/tutorial/[sessionId].tsx](pages/tutorial/[sessionId].tsx)): Requires authentication
-   - Dashboard ([pages/dashboard.tsx](pages/dashboard.tsx)): Requires authentication - shows saved tutorials and preferences
+   - Saved storyboards ([pages/saved.tsx](pages/saved.tsx)): Shows user's saved tutorials
    - Login page ([pages/login.tsx](pages/login.tsx)): Public
+   - Signup page ([pages/signup.tsx](pages/signup.tsx)): Public
 
 3. **User Features**:
-   - **User Preferences** ([pages/api/user/preferences.ts](pages/api/user/preferences.ts)): Store default narrative style preference
-   - **Saved Tutorials** ([pages/api/user/save-tutorial.ts](pages/api/user/save-tutorial.ts)): Save completed tutorials to Supabase
-   - **Tutorial Library** ([pages/api/user/tutorials.ts](pages/api/user/tutorials.ts)): View and manage saved tutorials
-   - **Dashboard**: Central hub for managing preferences and viewing tutorial history
+   - **Storyboard Storage** ([pages/api/storyboards/save.ts](pages/api/storyboards/save.ts)): Save completed tutorials to DynamoDB
+   - **Storyboard Library** ([pages/api/storyboards/list.ts](pages/api/storyboards/list.ts)): View and manage saved tutorials
+   - **JWT Authentication**: All API routes protected with Cognito JWT verification
 
 ### Request Pipeline
 
@@ -97,7 +99,7 @@ Create `.env.local` file with:
    - Fetches session data via GET /api/tutorial
    - Displays frames with images and audio playback
    - Supports frame navigation and audio rephrasing
-   - "Save Tutorial" button persists tutorial to user's Supabase account
+   - "Save Tutorial" button persists tutorial to DynamoDB
 
 ### Session Management
 
@@ -165,59 +167,27 @@ S3 bucket must be configured with:
 3. Files stored at: `{sessionId}/frame{N}.png` and `{sessionId}/frame{N}.mp3`
 4. Public URL format: `https://{bucket}.s3.amazonaws.com/{sessionId}/frame{N}.{ext}`
 
-### Supabase Setup
+### AWS Cognito & DynamoDB Setup
 
-**Database Schema** (run in Supabase SQL Editor):
+**Cognito User Pool Configuration**:
+1. Create User Pool with email sign-in
+2. **Critical**: App client must have **NO client secret** (public client for web apps)
+3. Enable self-service sign-up and email verification
+4. Auth flows: `ALLOW_USER_PASSWORD_AUTH`, `ALLOW_REFRESH_TOKEN_AUTH`
 
-```sql
--- User preferences table
-create table user_preferences (
-  user_id uuid references auth.users(id) primary key,
-  preferred_style text default 'explain5',
-  created_at timestamp with time zone default now(),
-  updated_at timestamp with time zone default now()
-);
+**DynamoDB Tables**:
 
--- Saved tutorials table
-create table saved_tutorials (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid references auth.users(id) not null,
-  session_id text not null,
-  title text,
-  url text not null,
-  style text not null,
-  frames jsonb not null,
-  created_at timestamp with time zone default now()
-);
+**Table 1: tutorialize-users**
+- Partition key: `userId` (String)
+- Stores user metadata and preferences
 
--- Indexes
-create index idx_saved_tutorials_user_id on saved_tutorials(user_id);
-create index idx_saved_tutorials_created_at on saved_tutorials(created_at desc);
+**Table 2: tutorialize-storyboards**
+- Partition key: `userId` (String)
+- Sort key: `sessionId` (String)
+- Stores saved tutorial data with frames (JSON)
+- Global Secondary Index (optional): `sessionId-index` for session lookups
 
--- Row Level Security
-alter table user_preferences enable row level security;
-alter table saved_tutorials enable row level security;
-
--- Policies (users can only access their own data)
-create policy "Users can view own preferences" on user_preferences
-  for select using (auth.uid() = user_id);
-create policy "Users can update own preferences" on user_preferences
-  for update using (auth.uid() = user_id);
-create policy "Users can insert own preferences" on user_preferences
-  for insert with check (auth.uid() = user_id);
-
-create policy "Users can view own tutorials" on saved_tutorials
-  for select using (auth.uid() = user_id);
-create policy "Users can insert own tutorials" on saved_tutorials
-  for insert with check (auth.uid() = user_id);
-create policy "Users can delete own tutorials" on saved_tutorials
-  for delete using (auth.uid() = user_id);
-```
-
-**Authentication Providers** (configure in Supabase Dashboard > Authentication > Providers):
-- Email/Password: Enabled by default
-- Google OAuth: Optional (requires client ID/secret)
-- GitHub OAuth: Optional (requires client ID/secret)
+See [AWS_SETUP_GUIDE.md](AWS_SETUP_GUIDE.md) and [AUTHENTICATION_CHECKLIST.md](AUTHENTICATION_CHECKLIST.md) for detailed setup instructions.
 
 ## Common Development Scenarios
 
@@ -257,16 +227,17 @@ The core storyboard creation happens in Claude's response to the prompt. To chan
 - **Framework**: Next.js 14 (Pages Router, not App Router)
 - **Language**: TypeScript
 - **Styling**: Tailwind CSS
-- **Authentication**: Supabase Auth (email/password + OAuth)
-- **Database**: Supabase PostgreSQL (user preferences, saved tutorials)
+- **Authentication**: AWS Cognito (email/password with email verification)
+- **Database**: AWS DynamoDB (user data, saved tutorials)
 - **APIs**: Next.js API Routes (serverless functions)
 - **External Services**:
   - Anthropic Claude Sonnet 4.5 (AI reasoning)
   - BrightData Web Unlocker (web scraping)
   - Pollinations.ai (free image generation)
   - Fish.Audio (TTS)
-  - AWS S3 (storage)
-  - Supabase (auth + database)
+  - AWS S3 (media storage)
+  - AWS Cognito (authentication)
+  - AWS DynamoDB (persistent storage)
 
 ## Project Structure
 
@@ -278,25 +249,29 @@ pages/
 │   ├── audio-gen.ts          # Fish.Audio TTS + S3 upload
 │   ├── rephrase-audio.ts     # Alternative narration generation
 │   ├── test-s3-access.ts     # S3 connectivity test endpoint
-│   └── user/
-│       ├── preferences.ts    # GET/PUT user preferences
-│       ├── save-tutorial.ts  # POST save tutorial to Supabase
-│       └── tutorials.ts      # GET/DELETE user's saved tutorials
+│   └── storyboards/
+│       ├── save.ts           # POST save tutorial to DynamoDB
+│       ├── list.ts           # GET user's saved tutorials
+│       └── [sessionId].ts    # GET specific saved tutorial
 ├── tutorial/
 │   └── [sessionId].tsx       # Tutorial viewer with frame navigation + save button
 ├── index.tsx                 # Landing page with URL input form
-├── dashboard.tsx             # User dashboard with saved tutorials & preferences
-├── login.tsx                 # Login/signup page with Supabase auth
-└── _app.tsx                  # Next.js app wrapper with Supabase provider
+├── saved.tsx                 # Saved storyboards library page
+├── login.tsx                 # Login page with Cognito auth
+├── signup.tsx                # Signup page with email verification
+└── _app.tsx                  # Next.js app wrapper with AuthProvider
 
 lib/
 ├── session-storage.ts        # In-memory session management (temp storage)
-└── supabase.ts               # Supabase client initialization
+├── cognito.ts                # AWS Cognito authentication client
+├── dynamodb.ts               # DynamoDB client for storyboard storage
+├── auth-middleware.ts        # JWT token verification middleware
+└── AuthContext.tsx           # React context for authentication state
 ```
 
 ## Known Limitations
 
-1. **In-memory sessions**: Active tutorial sessions (temp data) lost on restart; not horizontally scalable. Saved tutorials persist in Supabase.
+1. **In-memory sessions**: Active tutorial sessions (temp data) lost on restart; not horizontally scalable. Saved tutorials persist in DynamoDB.
 2. **Image generation latency**: 2-3 seconds per frame with Pollinations.ai
 3. **Serverless timeouts**: Long content may timeout on Vercel/Lambda (default 10s)
 4. **Rate limiting**: Implement user-based rate limiting for production to prevent abuse
@@ -305,9 +280,10 @@ lib/
 ## Testing & Validation
 
 **Setup Requirements:**
-1. Create Supabase project and run database schema
-2. Configure Supabase auth providers
-3. Add Supabase credentials to `.env.local`
+1. Create AWS Cognito User Pool (no client secret!)
+2. Create two DynamoDB tables (tutorialize-users, tutorialize-storyboards)
+3. Add AWS credentials to `.env.local`
+4. Run `npm run verify-auth` to verify configuration
 
 **Recommended test URLs:**
 - GitHub repo: `https://github.com/facebook/react`
@@ -330,8 +306,8 @@ lib/
 
 3. **User Features:**
    - Save tutorial from viewer page
-   - Navigate to dashboard
-   - Verify saved tutorial appears
-   - Update user preferences (narrative style)
+   - Navigate to "Saved Storyboards" page
+   - Verify saved tutorial appears in list
+   - View saved tutorial
    - Delete saved tutorial
-   - Verify saved tutorial can be re-opened and played
+   - Verify data persists in DynamoDB
